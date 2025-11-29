@@ -7,7 +7,7 @@ import os
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Unlimited Voice Studio", page_icon="🗣️", layout="centered")
 
-# --- STYLE (Clean, Minimal, ElevenLabs vibe) ---
+# --- STYLE ---
 st.markdown("""
 <style>
     .stTextArea textarea {
@@ -30,52 +30,60 @@ st.markdown("""
         background-color: #333;
         color: white;
     }
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    #MainMenu, footer, header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- BACKEND LOGIC ---
-async def generate_speech(text, voice, output_file):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(output_file)
+# --- FUNCTIONS ---
+
+def split_text(text, max_chars=2000):
+    """Splits text into chunks safe for the API"""
+    sentences = text.replace('\n', ' ').split('. ')
+    chunks = []
+    current_chunk = ""
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < max_chars:
+            current_chunk += sentence + ". "
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence + ". "
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
+
+async def generate_chunk(text, voice, rate_str):
+    """Generates audio for a single chunk"""
+    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+    # We save to a memory buffer instead of file to be faster
+    audio_bytes = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_bytes += chunk["data"]
+    return audio_bytes
 
 # --- APP UI ---
 st.title("🗣️ Free Unlimited Voice Studio")
-st.caption("No Limits • No Queue • High Quality")
+st.caption("Auto-Chunking Enabled • Long Text Support")
 
 # 1. Text Input
-text_input = st.text_area(
-    "Script", 
-    height=350, 
-    placeholder="Paste your long script here (20k+ characters supported)...",
-    label_visibility="collapsed"
-)
+text_input = st.text_area("Script", height=350, placeholder="Paste your long script here...")
+st.caption(f"{len(text_input)} chars")
 
-col_info, col_count = st.columns([3, 1])
-col_info.info("✨ Suggestion: Use 'Guy' or 'Jenny' for best results.")
-col_count.caption(f"{len(text_input)} chars")
-
-# 2. Settings (Clean Dropdown)
+# 2. Settings
 with st.expander("⚙️ Voice Settings", expanded=True):
-    # Popular high-quality voices
     voice_options = {
-        "🇺🇸 Male (Guy) - Professional": "en-US-GuyNeural",
-        "🇺🇸 Female (Jenny) - Soft": "en-US-JennyNeural",
-        "🇺🇸 Male (Christopher) - Deep": "en-US-ChristopherNeural",
-        "🇺🇸 Female (Aria) - Energetic": "en-US-AriaNeural",
-        "🇬🇧 Male (Ryan) - British": "en-GB-RyanNeural",
-        "🇬🇧 Female (Sonia) - British": "en-GB-SoniaNeural",
+        "🇺🇸 Male (Guy)": "en-US-GuyNeural",
+        "🇺🇸 Female (Jenny)": "en-US-JennyNeural",
+        "🇺🇸 Male (Christopher)": "en-US-ChristopherNeural",
+        "🇺🇸 Female (Aria)": "en-US-AriaNeural",
+        "🇬🇧 Male (Ryan)": "en-GB-RyanNeural",
+        "🇬🇧 Female (Sonia)": "en-GB-SoniaNeural",
         "🇵🇰 Urdu (Asad)": "ur-PK-AsadNeural",
         "🇵🇰 Urdu (Uzma)": "ur-PK-UzmaNeural"
     }
-    
     selected_voice_name = st.selectbox("Choose Voice", list(voice_options.keys()))
     selected_voice_code = voice_options[selected_voice_name]
-
-    # Speed slider
+    
     speed = st.slider("Speed", -50, 50, 0, format="%d%%")
     speed_str = f"{'+' if speed >= 0 else ''}{speed}%"
 
@@ -84,38 +92,41 @@ if st.button("Generate Audio"):
     if not text_input:
         st.warning("Please enter some text.")
     else:
-        status = st.empty()
-        status.text("Generating audio... (This is fast!)")
+        status_text = st.empty()
+        progress_bar = st.progress(0)
         
         try:
-            # Create temp file
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-            output_path = temp_file.name
-            temp_file.close()
-
-            # Run Async Function
-            # We add the speed modifier to the voice if supported, but edge-tts handles text-to-speech
-            # To keep it simple and stable, we stick to standard generation for now.
+            # 1. Split Text
+            chunks = split_text(text_input, max_chars=1500) # Safe limit per request
+            total_chunks = len(chunks)
+            final_audio_bytes = b""
             
-            asyncio.run(generate_speech(text_input, selected_voice_code, output_path))
+            # 2. Process Chunks
+            for i, chunk in enumerate(chunks):
+                if not chunk.strip(): continue
+                
+                status_text.text(f"Converting part {i+1} of {total_chunks}...")
+                progress_bar.progress((i / total_chunks))
+                
+                # Run Async function in Sync environment
+                chunk_audio = asyncio.run(generate_chunk(chunk, selected_voice_code, speed_str))
+                final_audio_bytes += chunk_audio
             
-            status.empty()
+            progress_bar.progress(1.0)
+            status_text.text("Finalizing...")
+            
+            # 3. Save Final Output
+            output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
+            with open(output_path, "wb") as f:
+                f.write(final_audio_bytes)
+            
+            # 4. Success
             st.success("Generation Complete!")
-            
-            # Audio Player
             st.audio(output_path)
             
-            # Download Button
             with open(output_path, "rb") as f:
-                st.download_button(
-                    label="⬇️ Download MP3",
-                    data=f,
-                    file_name="voice_studio_output.mp3",
-                    mime="audio/mpeg"
-                )
+                st.download_button("⬇️ Download Full MP3", f, "full_speech.mp3", "audio/mpeg")
                 
-            # Cleanup
-            os.unlink(output_path)
-
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error: {str(e)}")
+            st.info("Try refreshing the page if the error persists.")
